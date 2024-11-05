@@ -34,6 +34,8 @@ It is recommended to use the same master key for all the services belonging to t
 
 To learn how to set up the master key on the deployment server, please refer to the [decryptor](https://doc.networknt.com/concern/decryptor/).
 
+If you want to decrypt a secret from the encrypted config file, you can use this [test case](https://github.com/networknt/light-4j/blob/master/decryptor/src/test/java/com/networknt/decrypt/AESDecryptorTest.java#L40). Also, you can find the document on how to use it at https://doc.networknt.com/concern/decryptor/
+
 
 ### Build
 
