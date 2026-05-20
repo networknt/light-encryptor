@@ -1,12 +1,20 @@
 package com.networknt.encryptor;
 
-import javax.crypto.*;
-import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
-import java.io.UnsupportedEncodingException;
 import java.math.BigInteger;
-import java.security.*;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.security.spec.InvalidKeySpecException;
 import java.security.spec.KeySpec;
 import static java.lang.System.exit;
 
@@ -30,28 +38,18 @@ public class AESSaltEncryptor {
 
     private static final int ITERATIONS = 65536;
     private static final int KEY_SIZE = 256;
-    private static final String STRING_ENCODING = "UTF-8";
-    private static final byte[] iv = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    private static byte[] salt;
-    private SecretKeySpec secret;
-    private Cipher cipher;
-    private IvParameterSpec ivSpec;
+    private static final int SALT_LENGTH = 16;
+    private static final int GCM_IV_LENGTH = 12;
+    private static final int GCM_TAG_LENGTH = 128;
+
+    private final char[] password;
+    private final SecureRandom secureRandom = new SecureRandom();
 
     public AESSaltEncryptor(String password) {
-        try {
-            /* Derive the key, given password and salt. */
-            SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-            salt = getSalt();
-            KeySpec spec = new PBEKeySpec(password.toCharArray(), salt, ITERATIONS, KEY_SIZE);
-            SecretKey tmp = factory.generateSecret(spec);
-            secret = new SecretKeySpec(tmp.getEncoded(), "AES");
-            // CBC = Cipher Block chaining
-            // PKCS5Padding Indicates that the keys are padded
-            cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            ivSpec = new IvParameterSpec(iv);
-        } catch (Exception e) {
-            throw new RuntimeException("Unable to initialize", e);
+        if (password == null) {
+            throw new IllegalArgumentException("Password is required");
         }
+        this.password = password.toCharArray();
     }
 
     /**
@@ -65,31 +63,44 @@ public class AESSaltEncryptor {
     {
         try
         {
-            byte[] inputBytes = input.getBytes(STRING_ENCODING);
-            cipher.init(Cipher.ENCRYPT_MODE, secret, ivSpec);
+            byte[] salt = randomBytes(SALT_LENGTH);
+            byte[] iv = randomBytes(GCM_IV_LENGTH);
+            SecretKeySpec secret = createSecret(salt);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            byte[] inputBytes = input.getBytes(StandardCharsets.UTF_8);
+            cipher.init(Cipher.ENCRYPT_MODE, secret, new GCMParameterSpec(GCM_TAG_LENGTH, iv));
             byte[] out = cipher.doFinal(inputBytes);
-            return CRYPT_PREFIX + ":" + toHex(salt) + ":" +toHex(out);
+            return CRYPT_PREFIX + ":" + toHex(salt) + ":" + toHex(iv) + ":" + toHex(out);
         } catch (IllegalBlockSizeException e) {
             throw new RuntimeException("Unable to encrypt", e);
         } catch (BadPaddingException e) {
             throw new RuntimeException("Unable to encrypt", e);
         } catch (InvalidKeyException e) {
             throw new RuntimeException("Unable to encrypt", e);
-        } catch (UnsupportedEncodingException e) {
-            throw new RuntimeException("Unable to encrypt", e);
         } catch(NoSuchAlgorithmException e) {
             throw new RuntimeException("Unable to encrypt", e);
         } catch(InvalidAlgorithmParameterException e) {
             throw new RuntimeException("Unable to encrypt", e);
+        } catch(InvalidKeySpecException e) {
+            throw new RuntimeException("Unable to encrypt", e);
+        } catch(javax.crypto.NoSuchPaddingException e) {
+            throw new RuntimeException("Unable to encrypt", e);
         }
     }
 
-    private static byte[] getSalt() throws NoSuchAlgorithmException
+    private SecretKeySpec createSecret(byte[] salt) throws NoSuchAlgorithmException, InvalidKeySpecException
     {
-        SecureRandom sr = SecureRandom.getInstance("SHA1PRNG");
-        byte[] salt = new byte[16];
-        sr.nextBytes(salt);
-        return salt;
+        SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+        KeySpec spec = new PBEKeySpec(password, salt, ITERATIONS, KEY_SIZE);
+        SecretKey tmp = factory.generateSecret(spec);
+        return new SecretKeySpec(tmp.getEncoded(), "AES");
+    }
+
+    private byte[] randomBytes(int length)
+    {
+        byte[] bytes = new byte[length];
+        secureRandom.nextBytes(bytes);
+        return bytes;
     }
 
     private static String toHex(byte[] array) throws NoSuchAlgorithmException

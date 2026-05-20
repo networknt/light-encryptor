@@ -26,6 +26,11 @@ To encrypt a secret with a master key named master-key
 java -jar light-encryptor-1.0.0.jar "master-key" "secret"
 ```
 
+The encrypted value is emitted in the AES-GCM format `CRYPT:<hex-salt>:<hex-iv>:<hex-ciphertext-and-tag>`.
+This format is compatible with light-4j decryptor modules that support `CRYPT:salt:iv:hash`
+and `AES/GCM/NoPadding`. Older light-4j decryptors that only support the legacy
+three-part `CRYPT:salt:ciphertext` CBC format cannot decrypt newly generated values.
+
 When running the above command on Windows, enclose the plain text into double quotes("") in the command line above. 
 
 The master key should be configured on the target server as an environment variable or -D option in the java command line to start the light-4j server. 
@@ -49,6 +54,5 @@ mvn clean install
 ```
 mvn clean install deploy -DperformRelease
 ```
-
 
 
