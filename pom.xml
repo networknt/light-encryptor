@@ -69,7 +69,7 @@
         <version.maven-surefire>3.6.0</version.maven-surefire>
         <version.mockito>5.24.0</version.mockito>
         <version.hamcrest>3.0</version.hamcrest>
-        <version.maven-source>3.2.1</version.maven-source>
+        <version.maven-source>3.4.0</version.maven-source>
         <version.maven-doc>3.5.0</version.maven-doc>
         <version.maven-compiler>3.11.0</version.maven-compiler>
         <version.nexus-staging>1.6.13</version.nexus-staging>
