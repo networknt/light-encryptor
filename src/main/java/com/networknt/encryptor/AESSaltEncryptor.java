@@ -27,6 +27,15 @@ public class AESSaltEncryptor {
     public static String CRYPT_PREFIX = "CRYPT";
 
     public static void main(String [] args) {
+        if (args.length > 0 && "migrate".equals(args[0])) {
+            if (args.length > 2 || (args.length == 2 && !"--rotate-key".equals(args[1]))) {
+                System.err.println("Usage: java -jar light-encryptor-1.0.0.jar migrate [--rotate-key]");
+                exit(1);
+                return;
+            }
+            exit(LegacyCryptMigrator.run(System.console(), System.out, System.err, args.length == 2));
+            return;
+        }
         if(args.length < 2) {
             System.out.println("Please provide a master key and the plain text secret to encrypt!");
             System.out.println("java -jar encryptor.jar myKey mySecret");

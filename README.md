@@ -42,6 +42,52 @@ To learn how to set up the master key on the deployment server, please refer to 
 If you want to decrypt a secret from the encrypted config file, you can use this [test case](https://github.com/networknt/light-4j/blob/master/decryptor/src/test/java/com/networknt/decrypt/AESDecryptorTest.java#L40). Also, you can find the document on how to use it at https://doc.networknt.com/concern/decryptor/
 
 
+### Migrate legacy encrypted values
+
+Older releases produced three-part `CRYPT:salt:ciphertext` values using AES-CBC.
+Current light-4j decryptors require authenticated four-part AES-GCM values.
+Use the offline migration command to decrypt a legacy value in memory and
+re-encrypt it with a fresh salt and nonce. The original master key is required;
+adding a fourth field to an old value cannot convert it.
+
+Build this version first, then run from an interactive terminal:
+
+```
+java -jar target/light-encryptor-1.0.0.jar migrate
+```
+
+The command prompts without echo for the legacy value and original master key.
+It prints only the replacement four-part value to standard output; prompts and
+diagnostics go to the terminal or standard error. Clear text is never printed
+or written to a file. Without an interactive terminal, migration fails rather
+than accepting master keys through command-line arguments. Treat the generated
+value as sensitive configuration data.
+
+To also rotate the master key:
+
+```
+java -jar target/light-encryptor-1.0.0.jar migrate --rotate-key
+```
+
+This additionally prompts for and confirms the new master key. Configure that
+key on the destination service when deploying the replacement value.
+
+Legacy CBC has no authentication tag. A wrong key or damaged ciphertext may
+occasionally decrypt without an error, so a successful migration alone does not
+prove the original secret was correct. Validate the migrated credential against
+its target service in a controlled environment before deployment.
+
+Back up the existing configuration, migrate each three-part value, and replace
+only the corresponding values in a separate configuration copy. Leave existing
+four-part values unchanged; this command accepts only legacy three-part inputs.
+Validate all migrated credentials, then deploy the configuration with a GCM-capable
+light-4j runtime and the chosen master key. Keep the original configuration and
+key available for rollback with the old runtime until validation is complete.
+The command does not modify files or restore legacy CBC runtime support.
+
+Temporary plaintext bytes and owned password/key buffers are cleared on completion
+where accessible; this is not a guarantee of complete JVM heap erasure.
+
 ### Build
 
 ```
