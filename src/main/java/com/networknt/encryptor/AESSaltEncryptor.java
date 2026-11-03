@@ -1,48 +1,30 @@
 package com.networknt.encryptor;
 
-import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
-import javax.crypto.IllegalBlockSizeException;
-import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
-import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
-import java.security.InvalidAlgorithmParameterException;
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
+import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
-import java.security.spec.InvalidKeySpecException;
-import java.security.spec.KeySpec;
+import java.util.Arrays;
+import java.util.HexFormat;
 import static java.lang.System.exit;
 
-/**
- * This is a new encryptor utility to encrypt the secret with stronger implementation.
- * Instead of using a static salt, we are generating a salt for each invocation to make
- * dictionary attack harder. Also, a master key is passed in to encrypt the secret.
- */
+/** Encrypts configuration secrets using a fresh salt and authenticated AES-GCM. */
 public class AESSaltEncryptor {
     public static String CRYPT_PREFIX = "CRYPT";
 
     public static void main(String [] args) {
-        if (args.length > 0 && "migrate".equals(args[0])) {
-            if (args.length > 2 || (args.length == 2 && !"--rotate-key".equals(args[1]))) {
-                System.err.println("Usage: java -jar light-encryptor-1.0.0.jar migrate [--rotate-key]");
-                exit(1);
-                return;
-            }
-            exit(LegacyCryptMigrator.run(System.console(), System.out, System.err, args.length == 2));
-            return;
-        }
         if(args.length < 2) {
             System.out.println("Please provide a master key and the plain text secret to encrypt!");
             System.out.println("java -jar encryptor.jar myKey mySecret");
             exit(0);
+        } else {
+            AESSaltEncryptor encryptor = new AESSaltEncryptor(args[0]);
+            System.out.println(encryptor.encrypt(args[1]));
         }
-        AESSaltEncryptor encryptor = new AESSaltEncryptor(args[0]);
-        System.out.println(encryptor.encrypt(args[1]));
     }
 
     private static final int ITERATIONS = 65536;
@@ -52,7 +34,6 @@ public class AESSaltEncryptor {
     private static final int GCM_TAG_LENGTH = 128;
 
     private final char[] password;
-    private final SecureRandom secureRandom = new SecureRandom();
 
     public AESSaltEncryptor(String password) {
         if (password == null) {
@@ -62,67 +43,47 @@ public class AESSaltEncryptor {
     }
 
     /**
-     * Encrypt given input string
-     *
-     * @param input String
-     * @return encrypted value
-     * @throws RuntimeException exception
+     * Encrypts the given UTF-8 input string.
+     * @param input clear text
+     * @return four-part encrypted value
      */
-    public String encrypt(String input)
-    {
-        try
-        {
-            byte[] salt = randomBytes(SALT_LENGTH);
-            byte[] iv = randomBytes(GCM_IV_LENGTH);
-            SecretKeySpec secret = createSecret(salt);
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            byte[] inputBytes = input.getBytes(StandardCharsets.UTF_8);
-            cipher.init(Cipher.ENCRYPT_MODE, secret, new GCMParameterSpec(GCM_TAG_LENGTH, iv));
-            byte[] out = cipher.doFinal(inputBytes);
-            return CRYPT_PREFIX + ":" + toHex(salt) + ":" + toHex(iv) + ":" + toHex(out);
-        } catch (IllegalBlockSizeException e) {
+    public String encrypt(String input) {
+        byte[] bytes = input.getBytes(StandardCharsets.UTF_8);
+        try {
+            return encryptBytes(bytes, password);
+        } catch (GeneralSecurityException e) {
             throw new RuntimeException("Unable to encrypt", e);
-        } catch (BadPaddingException e) {
-            throw new RuntimeException("Unable to encrypt", e);
-        } catch (InvalidKeyException e) {
-            throw new RuntimeException("Unable to encrypt", e);
-        } catch(NoSuchAlgorithmException e) {
-            throw new RuntimeException("Unable to encrypt", e);
-        } catch(InvalidAlgorithmParameterException e) {
-            throw new RuntimeException("Unable to encrypt", e);
-        } catch(InvalidKeySpecException e) {
-            throw new RuntimeException("Unable to encrypt", e);
-        } catch(javax.crypto.NoSuchPaddingException e) {
-            throw new RuntimeException("Unable to encrypt", e);
+        } finally {
+            Arrays.fill(bytes, (byte) 0);
         }
     }
 
-    private SecretKeySpec createSecret(byte[] salt) throws NoSuchAlgorithmException, InvalidKeySpecException
-    {
-        SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-        KeySpec spec = new PBEKeySpec(password, salt, ITERATIONS, KEY_SIZE);
-        SecretKey tmp = factory.generateSecret(spec);
-        return new SecretKeySpec(tmp.getEncoded(), "AES");
+    // Shared current-format encryption path for normal encryption and offline migration.
+    static String encryptBytes(byte[] input, char[] password) throws GeneralSecurityException {
+        SecureRandom random = new SecureRandom();
+        byte[] salt = new byte[SALT_LENGTH];
+        byte[] iv = new byte[GCM_IV_LENGTH];
+        random.nextBytes(salt);
+        random.nextBytes(iv);
+        byte[] key = deriveKey(password, salt, ITERATIONS, KEY_SIZE);
+        try {
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(GCM_TAG_LENGTH, iv));
+            HexFormat hex = HexFormat.of();
+            return CRYPT_PREFIX + ":" + hex.formatHex(salt) + ":" + hex.formatHex(iv) + ":"
+                    + hex.formatHex(cipher.doFinal(input));
+        } finally {
+            Arrays.fill(key, (byte) 0);
+        }
     }
 
-    private byte[] randomBytes(int length)
-    {
-        byte[] bytes = new byte[length];
-        secureRandom.nextBytes(bytes);
-        return bytes;
-    }
-
-    private static String toHex(byte[] array) throws NoSuchAlgorithmException
-    {
-        BigInteger bi = new BigInteger(1, array);
-        String hex = bi.toString(16);
-
-        int paddingLength = (array.length * 2) - hex.length();
-        if(paddingLength > 0)
-        {
-            return String.format("%0"  +paddingLength + "d", 0) + hex;
-        }else{
-            return hex;
+    static byte[] deriveKey(char[] password, byte[] salt, int iterations, int keySize)
+            throws GeneralSecurityException {
+        PBEKeySpec spec = new PBEKeySpec(password, salt, iterations, keySize);
+        try {
+            return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
+        } finally {
+            spec.clearPassword();
         }
     }
 }

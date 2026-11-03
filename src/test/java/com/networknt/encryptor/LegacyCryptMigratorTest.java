@@ -10,9 +10,16 @@ import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayOutputStream;
 import java.io.Console;
 import java.io.PrintStream;
+import java.io.OutputStream;
+import java.io.IOException;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.HexFormat;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -22,6 +29,11 @@ class LegacyCryptMigratorTest {
     private static final String LEGACY = "CRYPT:fc26c8416655560dc367b0636129d491:133bb376708628cc915ee9882603606d";
     private static final String EMPTY = "CRYPT:c1eaeefae703df2417d1ef5c5cc74b60:d28023c32d45ad33bc3987cbb823037d";
     private static final String PASSWORD = "migration-test-key";
+    // Multi-block fixture produced with the historical CBC/KDF parameters.
+    private static final String LONG = "CRYPT:42424242424242424242424242424242:"
+            + "8b4e2c501ed8d0a252ace8ab1728fe902497ba3ea79616e9c83c007a0198ba3b6"
+            + "117dcb6564c596ab4b81ac53ec085f85760fa5a7886aad36d1f32f0d01a9190107"
+            + "6cf8d8812f3e73ef397da3e8616d8eabb028392f707c2409df5bf995ed833";
 
     @Test
     void migratesHistoricalUnicodeAndEmptyValues() throws Exception {
@@ -29,6 +41,8 @@ class LegacyCryptMigratorTest {
         String migrated = LegacyCryptMigrator.migrate(LEGACY, key, key);
         assertEquals("secret-ü-🔑", decrypt(migrated, key));
         assertEquals("", decrypt(LegacyCryptMigrator.migrate(EMPTY, key, key), key));
+        assertEquals("A multi-block historical secret with Unicode ü and 🔑 repeated across CBC blocks.",
+                decrypt(LegacyCryptMigrator.migrate(LONG, key, key), key));
         assertArrayEquals(PASSWORD.toCharArray(), key);
         String[] parts = migrated.split(":");
         assertEquals(4, parts.length);
@@ -98,12 +112,12 @@ class LegacyCryptMigratorTest {
         PrintStream sink = new PrintStream(new ByteArrayOutputStream());
         assertEquals(1, LegacyCryptMigrator.run(null, new PrintStream(out), sink, false));
         Console console = mock(Console.class);
-        when(console.readPassword("Legacy CRYPT value (hidden): ")).thenReturn(LEGACY.toCharArray());
-        when(console.readPassword("Original master key: ")).thenReturn(PASSWORD.toCharArray());
+        when(console.readPassword("Legacy CRYPT value (hidden): ")).thenAnswer(invocation -> LEGACY.toCharArray());
+        when(console.readPassword("Original master key: ")).thenAnswer(invocation -> PASSWORD.toCharArray());
         when(console.readPassword("New master key: ")).thenReturn("one".toCharArray());
         when(console.readPassword("Confirm new master key: ")).thenReturn("two".toCharArray());
         assertEquals(1, LegacyCryptMigrator.run(console, new PrintStream(out), sink, true));
-        when(console.readPassword("Legacy CRYPT value (hidden): ")).thenReturn("invalid".toCharArray());
+        when(console.readPassword("Legacy CRYPT value (hidden): ")).thenAnswer(invocation -> "invalid".toCharArray());
         assertEquals(1, LegacyCryptMigrator.run(console, new PrintStream(out), sink, false));
         when(console.readPassword("Legacy CRYPT value (hidden): ")).thenReturn((char[]) null);
         assertEquals(1, LegacyCryptMigrator.run(console, new PrintStream(out), sink, false));
@@ -120,6 +134,81 @@ class LegacyCryptMigratorTest {
                 new PrintStream(new ByteArrayOutputStream()), false));
         assertEquals("secret-ü-🔑", decrypt(out.toString(StandardCharsets.UTF_8).strip(), PASSWORD.toCharArray()));
         verify(console, never()).readPassword("New master key: ");
+    }
+
+    @Test
+    void rejectsWrongKeyThatPassesCbcPaddingButProducesInvalidUtf8() throws Exception {
+        char[] wrongKey = "review-wrong-key-184".toCharArray();
+        // This exact key passed padding and was emitted as GCM before the fix.
+        assertThrows(CharacterCodingException.class,
+                () -> LegacyCryptMigrator.migrate(LEGACY, wrongKey, PASSWORD.toCharArray()));
+        Console console = prompts(LEGACY, "review-wrong-key-184");
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        assertEquals(1, LegacyCryptMigrator.run(console, new PrintStream(out), new PrintStream(err), false));
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("not valid UTF-8"));
+    }
+
+    @Test
+    void failedStdoutWriteReturnsFailure() {
+        PrintStream broken = new PrintStream(new OutputStream() {
+            @Override
+            public void write(int value) throws IOException {
+                throw new IOException("test write failure");
+            }
+        });
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        assertEquals(1, LegacyCryptMigrator.run(prompts(LEGACY, PASSWORD), broken, new PrintStream(err), false));
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("Unable to write"));
+    }
+
+    @Test
+    void blankRotatedKeyHasSpecificDiagnostic() {
+        Console console = prompts(LEGACY, PASSWORD);
+        when(console.readPassword("New master key: ")).thenAnswer(invocation -> " \t".toCharArray());
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        assertEquals(1, LegacyCryptMigrator.run(console, new PrintStream(out), new PrintStream(err), true));
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("New master key must not be blank"));
+        verify(console, never()).readPassword("Confirm new master key: ");
+    }
+
+    @Test
+    void outputFileContainsOnlyCiphertextAndNeverOverwrites(@TempDir Path directory) throws Exception {
+        Path file = directory.resolve("replacement.txt");
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        PrintStream sink = new PrintStream(new ByteArrayOutputStream());
+        assertEquals(0, LegacyCryptMigrator.run(prompts(LEGACY, PASSWORD), new PrintStream(out), sink, false, file));
+        String original = Files.readString(file);
+        assertEquals("secret-ü-🔑", decrypt(original.strip(), PASSWORD.toCharArray()));
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+        if (Files.getFileStore(file).supportsFileAttributeView("posix")) {
+            assertEquals(PosixFilePermissions.fromString("rw-------"), Files.getPosixFilePermissions(file));
+        }
+        assertEquals(1, LegacyCryptMigrator.run(prompts(LEGACY, PASSWORD), new PrintStream(out), sink, false, file));
+        assertEquals(original, Files.readString(file));
+        Path invalid = directory.resolve("invalid.txt");
+        assertEquals(1, LegacyCryptMigrator.run(prompts(LEGACY, "review-wrong-key-184"),
+                new PrintStream(out), sink, false, invalid));
+        assertFalse(Files.exists(invalid));
+        assertEquals(1, LegacyCryptMigrator.run(prompts(LEGACY, PASSWORD), new PrintStream(out), sink,
+                false, directory.resolve("missing-parent/result.txt")));
+    }
+
+    @Test
+    void legacyConversionIsNotPublicLibraryApi() throws Exception {
+        assertFalse(java.lang.reflect.Modifier.isPublic(LegacyCryptMigrator.class.getModifiers()));
+        assertFalse(java.lang.reflect.Modifier.isPublic(LegacyCryptMigrator.class
+                .getDeclaredMethod("migrate", String.class, char[].class, char[].class).getModifiers()));
+    }
+
+    private static Console prompts(String value, String key) {
+        Console console = mock(Console.class);
+        when(console.readPassword("Legacy CRYPT value (hidden): ")).thenAnswer(invocation -> value.toCharArray());
+        when(console.readPassword("Original master key: ")).thenAnswer(invocation -> key.toCharArray());
+        return console;
     }
 
     private static String decrypt(String value, char[] password) throws Exception {
